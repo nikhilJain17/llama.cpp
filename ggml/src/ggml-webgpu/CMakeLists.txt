@@ -78,3 +78,29 @@ endif()
 
 target_include_directories(ggml-webgpu PRIVATE ${SHADER_OUTPUT_DIR})
 target_link_libraries(ggml-webgpu PRIVATE ${DawnWebGPU_TARGET})
+
+# -----------------------------------------------------------------------------
+# Test executable: test_webgpu_resolve
+# -----------------------------------------------------------------------------
+
+add_executable(test_webgpu_resolve
+    test/test_resolve_query_access_pattern.cpp   # ← you create this file
+)
+
+# Include headers (same as ggml-webgpu)
+target_include_directories(test_webgpu_resolve PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${SHADER_OUTPUT_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+
+# Link against:
+# - ggml-webgpu (your backend)
+# - Dawn WebGPU implementation
+target_link_libraries(test_webgpu_resolve PRIVATE
+    ggml-webgpu
+    ${DawnWebGPU_TARGET}
+)
+
+# Ensure shaders are generated before building test
+add_dependencies(test_webgpu_resolve generate_shaders)

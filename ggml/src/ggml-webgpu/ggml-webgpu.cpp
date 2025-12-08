@@ -186,6 +186,22 @@ struct webgpu_buf_pool {
     }
 };
 
+bool ggml_webgpu_cpu_profile_enabled() {
+#ifdef GGML_WEBGPU_CPU_PROFILE
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool ggml_webgpu_gpu_profile_enabled() {
+#ifdef GGML_WEBGPU_GPU_PROFILE
+    return true;
+#else
+    return false;
+#endif
+}
+
 #ifdef GGML_WEBGPU_GPU_PROFILE
 struct webgpu_gpu_profile_bufs {
     wgpu::Buffer   host_buf;
@@ -510,8 +526,28 @@ static webgpu_submission_futures ggml_backend_webgpu_submit(webgpu_context ctx, 
         if (command.set_rows_error_bufs) {
             set_rows_error_bufs.push_back(command.set_rows_error_bufs.value());
         }
+#ifdef GGML_WEBGPU_GPU_PROFILE
+        pipeline_name_and_ts_bufs.push_back({command.pipeline_name, command.timestamp_query_bufs});
+#endif
     }
+
+#ifdef GGML_WEBGPU_GPU_PROFILE
+    // Create a single command encoder for resolving all queries at once
+    wgpu::CommandEncoder resolve_encoder = ctx->device.CreateCommandEncoder();
+    
+    // Resolve all query sets in one batch
+    for (const auto& [name, ts_bufs] : pipeline_name_and_ts_bufs) {
+        resolve_encoder.ResolveQuerySet(ts_bufs.query_set, 0, 2, ts_bufs.dev_buf, 0);
+        resolve_encoder.CopyBufferToBuffer(ts_bufs.dev_buf, 0, ts_bufs.host_buf, 0, ts_bufs.host_buf.GetSize());
+    }
+    
+    wgpu::CommandBuffer resolve_commands = resolve_encoder.Finish();
+    command_buffers.push_back(resolve_commands);
+#endif
+
     ctx->queue.Submit(command_buffers.size(), command_buffers.data());
+
+    // ... rest of the function remains the same
 
     std::vector<wgpu::FutureWaitInfo> futures;
 
@@ -563,7 +599,8 @@ static webgpu_submission_futures ggml_backend_webgpu_submit(webgpu_context ctx, 
                     ctx->timestamp_query_buf_pool.free_bufs({ ts_bufs });
                 }
             });
-        futures.push_back({ f });
+//         // std::cout << ">>> Not pushing future back\n";
+//         // futures.push_back({ f });
     }
 #endif
     return { futures };
@@ -625,8 +662,12 @@ static webgpu_command ggml_backend_webgpu_build(webgpu_context &                
 
 #ifdef GGML_WEBGPU_GPU_PROFILE
     // Resolve the query set into the device buffer
-    encoder.ResolveQuerySet(ts_bufs.query_set, 0, 2, ts_bufs.dev_buf, 0);
-    encoder.CopyBufferToBuffer(ts_bufs.dev_buf, 0, ts_bufs.host_buf, 0, ts_bufs.host_buf.GetSize());
+    // >>> TODO: commented out copying timestamp buffer from device to host to see if it causes delay
+    // >>> This just copies ts_bufs.query_set to ts_bufs.dev_buf 8 bytes at a time. 
+    // >>> Proof: https://gpuweb.github.io/gpuweb/#dom-gpucommandencoder-resolvequeryset
+    // encoder.ResolveQuerySet(ts_bufs.query_set, 0, 2, ts_bufs.dev_buf, 0);
+    // >>> This copies dev_buf --> host_buf.
+    // encoder.CopyBufferToBuffer(ts_bufs.dev_buf, 0, ts_bufs.host_buf, 0, ts_bufs.host_buf.GetSize());
 #endif
 
     // If there are SET_ROWS operations in this submission, copy their error buffers to the host.
@@ -659,6 +700,7 @@ static void ggml_backend_webgpu_buffer_memset(webgpu_context & ctx,
     size_t   bytes_per_wg = WEBGPU_MAX_WG_SIZE * ctx->memset_bytes_per_thread;
     uint32_t wg_x         = CEIL_DIV(size + 3, bytes_per_wg);
 
+    // TODO >>> main orchestrator for pipeline. Create command, submit command / pipeline, and synchronize.
     webgpu_command command = ggml_backend_webgpu_build(ctx, ctx->memset_pipelines[0], params, entries, wg_x);
     std::vector<webgpu_submission_futures> futures = { ggml_backend_webgpu_submit(ctx, { command }) };
     ggml_backend_webgpu_wait(ctx, futures);
@@ -2322,6 +2364,8 @@ static ggml_backend_t ggml_backend_webgpu_device_init(ggml_backend_dev_t dev, co
     GGML_UNUSED(params);
 
     WEBGPU_LOG_DEBUG("ggml_backend_webgpu_device_init()");
+    std::cout << ">>> gpu profiling enabled: " << ggml_webgpu_gpu_profile_enabled() << "\n";
+    std::cout << ">>> cpu profiling enabled: " << ggml_webgpu_cpu_profile_enabled() << "\n";
 
     ggml_backend_webgpu_device_context * dev_ctx    = static_cast<ggml_backend_webgpu_device_context *>(dev->context);
     webgpu_context                       webgpu_ctx = dev_ctx->webgpu_ctx;
@@ -2847,7 +2891,6 @@ ggml_backend_reg_t ggml_backend_webgpu_reg() {
 
 ggml_backend_t ggml_backend_webgpu_init(void) {
     ggml_backend_dev_t dev = ggml_backend_reg_dev_get(ggml_backend_webgpu_reg(), 0);
-
     return ggml_backend_webgpu_device_init(dev, nullptr);
 }
 
