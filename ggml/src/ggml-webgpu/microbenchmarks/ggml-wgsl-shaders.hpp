@@ -1,4 +1,5 @@
 // Auto-generated shader embedding
+// Generate via ggml/src/ggml-webgpu/wgsl-shaders/embed_wgsl.py
 
 const char* wgsl_add_f32 = R"(enable f16;
 struct Params {
