@@ -326,6 +326,8 @@ struct webgpu_context_struct {
 #ifdef GGML_WEBGPU_GPU_PROFILE
     // Profiling: per-shader GPU time in ms
     std::unordered_map<std::string, double> shader_gpu_time_ms;
+    // Profiling: per-shader FLOPS
+    std::unordered_map<std::string, uint64_t> shader_flops; 
     // Profiling: pool of timestamp query buffers (one per operation)
     webgpu_gpu_profile_buf_pool             timestamp_query_buf_pool;
 #endif
@@ -705,11 +707,16 @@ static void ggml_backend_webgpu_free(ggml_backend_t backend) {
         total_gpu += kv.second;
     }
     std::cout << "ggml_webgpu: total gpu time (all shaders): " << total_gpu << " ms\n";
-    std::cout << "\nggml_webgpu: gpu breakdown:\n";
+    std::cout << "\nggml_webgpu: gpu breakdown:";
     for (const auto & kv : ctx->webgpu_ctx->shader_gpu_time_ms) {
         double pct = (total_gpu > 0.0) ? (kv.second / total_gpu * 100.0) : 0.0;
-        std::cout << "ggml_webgpu:  " << kv.first << ": " << kv.second << " ms (" << pct << "%)\n";
+        std::cout << "\nggml_webgpu:  " << kv.first << ": " << kv.second << " ms (" << pct << "%)";
+        if (ctx->webgpu_ctx->shader_flops.count(kv.first)) {
+            std::cout << ", " << ctx->webgpu_ctx->shader_flops[kv.first] <<  " flops, ";
+            std::cout << (ctx->webgpu_ctx->shader_flops[kv.first] / kv.second * 100) << " flop/s";
+        }
     }
+
 #endif
 
 #if defined(GGML_WEBGPU_CPU_PROFILE) && defined(GGML_WEBGPU_GPU_PROFILE)
@@ -983,6 +990,13 @@ static webgpu_command ggml_webgpu_mul_mat(webgpu_context & ctx,
             wg_x = wg_m * wg_n * dst->ne[2] * dst->ne[3];
         }
     }
+#ifdef GGML_WEBGPU_GPU_PROFILE
+    uint64_t m, n, k;
+    m = dst->ne[0]; 
+    n = dst->ne[1]; 
+    k = src0->ne[0]; 
+    ctx->shader_flops[pipeline.name] += 2 * m * n * k; 
+#endif
     return ggml_backend_webgpu_build(ctx, pipeline, params, entries, wg_x, wg_y);
 }
 
