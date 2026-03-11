@@ -301,7 +301,7 @@ struct webgpu_global_context_struct {
     webgpu_capabilities  capabilities;
     // Shared buffer to move data from device to host
     wgpu::Buffer         get_tensor_staging_buf;
-    // Global mutex for pipeline and staging buffer, will be refactored to exclude pipeline caches.
+    // Global mutex for pipeline and staging buffer
     std::recursive_mutex mutex;
 
     webgpu_buf_pool                memset_buf_pool;
@@ -319,6 +319,7 @@ struct webgpu_global_context_struct {
     std::unordered_map<std::string, double> shader_gpu_time_ms;
     // Profiling: pool of timestamp query buffers (one per operation)
     webgpu_gpu_profile_buf_pool             timestamp_query_buf_pool;
+    std::vector<wgpu::FutureWaitInfo>       profiling_futures;
 #endif
 
 #ifdef GGML_WEBGPU_DEBUG
@@ -487,15 +488,22 @@ static void ggml_backend_webgpu_wait_profile_futures(webgpu_global_context &    
     if (futures.empty()) {
         return;
     }
-
+    
+    
     uint64_t timeout_ms = block ? UINT64_MAX : 0;
     if (block) {
         while (!futures.empty()) {
-            auto waitStatus = ctx->instance.WaitAny(futures.size(), futures.data(), timeout_ms);
-            if (ggml_backend_webgpu_handle_wait_status(waitStatus)) {
-                ggml_backend_webgpu_erase_completed_futures(futures);
+            // We can only wait on 64 futures at a time
+            size_t count = std::min<size_t>(64, futures.size());
+            
+            auto waitStatus = ctx->instance.WaitAny(count, futures.data(), UINT64_MAX);
+            if (!ggml_backend_webgpu_handle_wait_status(waitStatus)) {
+                break;
             }
+
+            ggml_backend_webgpu_erase_completed_futures(futures);
         }
+
     } else {
         auto waitStatus = ctx->instance.WaitAny(futures.size(), futures.data(), timeout_ms);
         if (ggml_backend_webgpu_handle_wait_status(waitStatus, true)) {
@@ -516,9 +524,6 @@ static void ggml_backend_webgpu_wait(webgpu_global_context &          ctx,
     while (subs.size() >= WEBGPU_MAX_INFLIGHT_SUBS_PER_THREAD) {
         auto waitStatus = ctx->instance.WaitAny(1, &subs[0].submit_done, UINT64_MAX);
         if (ggml_backend_webgpu_handle_wait_status(waitStatus)) {
-#ifdef GGML_WEBGPU_GPU_PROFILE
-            ggml_backend_webgpu_wait_profile_futures(ctx, subs[0].profile_futures, true);
-#endif
             subs.erase(subs.begin());
         }
     }
@@ -533,9 +538,6 @@ static void ggml_backend_webgpu_wait(webgpu_global_context &          ctx,
                 auto waitStatus = ctx->instance.WaitAny(1, &sub.submit_done, UINT64_MAX);
                 ggml_backend_webgpu_handle_wait_status(waitStatus);
             }
-#ifdef GGML_WEBGPU_GPU_PROFILE
-            ggml_backend_webgpu_wait_profile_futures(ctx, sub.profile_futures, true);
-#endif
         }
         subs.clear();
     } else {
@@ -543,12 +545,7 @@ static void ggml_backend_webgpu_wait(webgpu_global_context &          ctx,
         for (auto sub = subs.begin(); sub != subs.end();) {
             auto waitStatus = ctx->instance.WaitAny(1, &sub->submit_done, 0);
             ggml_backend_webgpu_handle_wait_status(waitStatus, true);
-#ifdef GGML_WEBGPU_GPU_PROFILE
-            ggml_backend_webgpu_wait_profile_futures(ctx, sub->profile_futures, false);
-            if (sub->submit_done.completed && sub->profile_futures.empty()) {
-#else
             if (sub->submit_done.completed) {
-#endif
                 sub = subs.erase(sub);
             } else {
                 ++sub;
@@ -634,7 +631,8 @@ static webgpu_submission ggml_backend_webgpu_submit(webgpu_global_context &     
                 // We can't unmap in here due to WebGPU reentrancy limitations.
                 ctx->timestamp_query_buf_pool.free_bufs({ ts_bufs });
             });
-        submission.profile_futures.push_back({ f });
+        // submission.profile_futures.push_back({ f });
+        ctx->profiling_futures.push_back({ f, false });
     }
 #endif
     return submission;
@@ -785,6 +783,10 @@ static void ggml_backend_webgpu_free(ggml_backend_t backend) {
 #endif
 
 #ifdef GGML_WEBGPU_GPU_PROFILE
+
+    ggml_backend_webgpu_wait_profile_futures(ctx->webgpu_ctx->global_ctx, 
+        ctx->webgpu_ctx->global_ctx->profiling_futures, true);
+
     std::cout << "\n[ggml_webgpu gpu profiling summary]\n";
     double total_gpu = 0.0;
     for (const auto & kv : ctx->webgpu_ctx->global_ctx->shader_gpu_time_ms) {
